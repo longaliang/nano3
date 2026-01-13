@@ -98,18 +98,44 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
       })
     }
 
-    const timeoutMs = Math.max(Number(process.env.GENERATE_TIMEOUT_MS) || 60000, 1000)
+    const timeoutMs = Math.max(Number(process.env.GENERATE_TIMEOUT_MS) || 15000, 1000)
+    const overallTimeoutMs = Math.max(
+      Number(process.env.GENERATE_OVERALL_TIMEOUT_MS) || timeoutMs,
+      1000
+    )
     const maxConcurrent = Math.min(
       Math.max(Number(process.env.GENERATE_MAX_CONCURRENT) || requestedImages, 1),
       requestedImages
     )
 
-    const tasks = Array.from({ length: requestedImages }, () => async () => {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    const controllers: AbortController[] = []
+    let overallTimedOut = false
 
-      try {
-        return await openai.chat.completions.create({
+    const overallTimer = setTimeout(() => {
+      overallTimedOut = true
+      for (const controller of controllers) {
+        controller.abort()
+      }
+    }, overallTimeoutMs)
+
+    const withTimeout = async <T,>(controller: AbortController, task: Promise<T>, ms: number) => {
+      return Promise.race([
+        task,
+        new Promise<T>((_, reject) => {
+          const timeout = setTimeout(() => {
+            controller.abort()
+            reject(new Error("Generation timed out"))
+          }, ms)
+          task.finally(() => clearTimeout(timeout))
+        }),
+      ])
+    }
+
+    const tasks = Array.from({ length: requestedImages }, () => {
+      const controller = new AbortController()
+      controllers.push(controller)
+      return async () => {
+        const request = openai.chat.completions.create({
           model: "google/gemini-3-pro-image-preview",
           messages: [
             {
@@ -120,8 +146,8 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
           modalities: ["image", "text"],
           signal: controller.signal,
         })
-      } finally {
-        clearTimeout(timeout)
+
+        return withTimeout(controller, request, timeoutMs)
       }
     })
 
@@ -130,6 +156,9 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
 
     const workers = Array.from({ length: maxConcurrent }, async () => {
       while (cursor < tasks.length) {
+        if (overallTimedOut) {
+          break
+        }
         const current = cursor
         cursor += 1
         try {
@@ -142,6 +171,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
     })
 
     await Promise.all(workers)
+    clearTimeout(overallTimer)
 
     const successful = completions.flatMap((result) =>
       result && result.status === "fulfilled" ? [result.value] : []
@@ -152,7 +182,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
     }
 
     const messages = successful.map((completion) => completion.choices[0].message)
-    const images = messages.flatMap(extractImages)
+    const images = messages.flatMap(extractImages).slice(0, requestedImages)
 
     return NextResponse.json({
       result: {
