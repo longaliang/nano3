@@ -15,10 +15,11 @@ export function Generator() {
   const [prompt, setPrompt] = useState("")
   const [uploadedImage, setUploadedImage] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationWarning, setGenerationWarning] = useState<string | null>(null)
   const [generatedImages, setGeneratedImages] = useState<string[]>([])
   const [aspectRatio, setAspectRatio] = useState("1:1")
   const [numImages, setNumImages] = useState([1])
-  const [activeTab, setActiveTab] = useState("image-to-image")
+  const [activeTab, setActiveTab] = useState("text-to-image")
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { t, language } = useLanguage()
 
@@ -59,8 +60,14 @@ export function Generator() {
       return
     }
 
+    if (activeTab === "image-to-image" && !uploadedImage) {
+      alert(language === "zh" ? "请先上传参考图" : "Please upload a reference image")
+      return
+    }
+
     setIsGenerating(true)
     setGeneratedImages([])
+    setGenerationWarning(null)
 
     try {
       const response = await fetch("/api/generate", {
@@ -84,10 +91,22 @@ export function Generator() {
 
       const data = await response.json()
 
+      const failedCount = data.result?.stats?.failed
+      if (typeof failedCount === "number" && failedCount > 0) {
+        setGenerationWarning(
+          language === "zh"
+            ? `有 ${failedCount} 次生成失败，但已展示成功结果`
+            : `${failedCount} generation(s) failed, showing successful results`
+        )
+      }
+
       // Handle images from the new response format
       if (data.result?.images) {
         const newImages = data.result.images.map((img: any) => img.image_url.url)
         setGeneratedImages(newImages)
+        if (newImages.length === 0) {
+          alert(language === "zh" ? "未生成任何图像" : "No images were generated")
+        }
       } else if (data.result?.content) {
         // Fallback for old format
         const content = data.result.content
@@ -98,6 +117,14 @@ export function Generator() {
             }
           }
         }
+        if (Array.isArray(content)) {
+          const hasImages = content.some((item) => item?.type === "image_url" && item?.image_url?.url)
+          if (!hasImages) {
+            alert(language === "zh" ? "未生成任何图像" : "No images were generated")
+          }
+        }
+      } else {
+        alert(language === "zh" ? "未生成任何图像" : "No images were generated")
       }
     } catch (error: any) {
       alert(error.message || (language === "zh" ? "生成图像失败" : "Failed to generate image"))
@@ -195,7 +222,7 @@ export function Generator() {
                 <Button
                   className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-semibold text-base py-6 rounded-xl shadow-lg"
                   onClick={handleGenerate}
-                  disabled={isGenerating}
+                  disabled={isGenerating || (activeTab === "image-to-image" && !uploadedImage)}
                 >
                   {isGenerating ? (
                     <>
@@ -306,7 +333,7 @@ export function Generator() {
                 <Button
                   className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-semibold text-base py-6 rounded-xl shadow-lg"
                   onClick={handleGenerate}
-                  disabled={isGenerating}
+                  disabled={isGenerating || (activeTab === "image-to-image" && !uploadedImage)}
                 >
                   {isGenerating ? (
                     <>
@@ -327,6 +354,9 @@ export function Generator() {
           {/* Output Gallery */}
           <Card className="p-8 shadow-xl border-2 flex flex-col">
             <h3 className="text-2xl font-bold mb-6">{t.generator.outputGallery}</h3>
+            {generationWarning ? (
+              <p className="text-sm text-amber-600 mb-4">{generationWarning}</p>
+            ) : null}
 
             {isGenerating ? (
               <div className="flex-1 flex items-center justify-center border-2 border-dashed border-border rounded-xl p-12 bg-muted/20">

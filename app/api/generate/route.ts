@@ -10,12 +10,60 @@ const openai = new OpenAI({
   },
 })
 
+type ImageItem = { image_url: { url: string } }
+
+function isValidImageUrl(url: string) {
+  if (typeof url !== "string" || url.length === 0) {
+    return false
+  }
+
+  if (url.startsWith("data:image/")) {
+    return true
+  }
+
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
+function extractImages(message: any): ImageItem[] {
+  const images: ImageItem[] = []
+
+  if (Array.isArray(message?.images)) {
+    for (const image of message.images) {
+      if (image?.image_url?.url && isValidImageUrl(image.image_url.url)) {
+        images.push({ image_url: { url: image.image_url.url } })
+      }
+    }
+  }
+
+  if (Array.isArray(message?.content)) {
+    for (const item of message.content) {
+      if (item?.type === "image_url" && item?.image_url?.url && isValidImageUrl(item.image_url.url)) {
+        images.push({ image_url: { url: item.image_url.url } })
+      }
+    }
+  }
+
+  return images
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const { prompt, imageBase64, aspectRatio } = await req.json()
+    const { prompt, imageBase64, aspectRatio, numImages, mode } = await req.json()
 
     if (!prompt) {
       return NextResponse.json({ error: "Prompt is required" }, { status: 400 })
+    }
+
+    const requestedImages = Math.min(Math.max(Number(numImages) || 1, 1), 4)
+    const isImageToImage = mode === "image-to-image"
+
+    if (isImageToImage && !imageBase64) {
+      return NextResponse.json({ error: "Reference image is required" }, { status: 400 })
     }
 
     // Map aspect ratios to dimensions
@@ -30,7 +78,9 @@ export async function POST(req: NextRequest) {
     const selectedRatio = dimensionMap[aspectRatio] || dimensionMap["1:1"]
 
     // Enhance prompt with aspect ratio information
-    const enhancedPrompt = `${prompt}\n\nGenerate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${selectedRatio.height}).`
+    const enhancedPrompt = `${prompt}
+
+Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${selectedRatio.height}).`
 
     const content: any[] = [
       {
@@ -39,7 +89,7 @@ export async function POST(req: NextRequest) {
       },
     ]
 
-    if (imageBase64) {
+    if (isImageToImage && imageBase64) {
       content.push({
         type: "image_url",
         image_url: {
@@ -48,18 +98,72 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    const completion = await openai.chat.completions.create({
-      model: "google/gemini-3-pro-image-preview",
-      messages: [
-        {
-          role: "user",
-          content,
-        },
-      ],
-      modalities: ["image", "text"],
+    const timeoutMs = Math.max(Number(process.env.GENERATE_TIMEOUT_MS) || 60000, 1000)
+    const maxConcurrent = Math.min(
+      Math.max(Number(process.env.GENERATE_MAX_CONCURRENT) || requestedImages, 1),
+      requestedImages
+    )
+
+    const tasks = Array.from({ length: requestedImages }, () => async () => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+      try {
+        return await openai.chat.completions.create({
+          model: "google/gemini-3-pro-image-preview",
+          messages: [
+            {
+              role: "user",
+              content,
+            },
+          ],
+          modalities: ["image", "text"],
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(timeout)
+      }
     })
 
-    return NextResponse.json({ result: completion.choices[0].message })
+    const completions: PromiseSettledResult<any>[] = Array(tasks.length)
+    let cursor = 0
+
+    const workers = Array.from({ length: maxConcurrent }, async () => {
+      while (cursor < tasks.length) {
+        const current = cursor
+        cursor += 1
+        try {
+          const value = await tasks[current]()
+          completions[current] = { status: "fulfilled", value }
+        } catch (error) {
+          completions[current] = { status: "rejected", reason: error }
+        }
+      }
+    })
+
+    await Promise.all(workers)
+
+    const successful = completions.flatMap((result) =>
+      result && result.status === "fulfilled" ? [result.value] : []
+    )
+
+    if (successful.length === 0) {
+      return NextResponse.json({ error: "All generation requests failed" }, { status: 502 })
+    }
+
+    const messages = successful.map((completion) => completion.choices[0].message)
+    const images = messages.flatMap(extractImages)
+
+    return NextResponse.json({
+      result: {
+        images,
+        stats: {
+          requested: requestedImages,
+          successful: successful.length,
+          failed: requestedImages - successful.length,
+        },
+      },
+    })
   } catch (error: any) {
     console.error("Generation error:", error)
     return NextResponse.json(
