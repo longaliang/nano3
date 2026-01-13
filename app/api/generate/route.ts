@@ -3,9 +3,9 @@ import OpenAI from "openai"
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
-  apiKey: "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",
+  apiKey: process.env.OPENROUTER_API_KEY || "",
   defaultHeaders: {
-    "HTTP-Referer": "http://localhost:3000",
+    "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
     "X-Title": "Nano Banana Image Editor",
   },
 })
