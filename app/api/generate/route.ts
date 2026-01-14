@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 
+export const runtime = "nodejs"
+export const maxDuration = 30
+
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -11,6 +14,25 @@ const openai = new OpenAI({
 })
 
 type ImageItem = { image_url: { url: string } }
+
+function getErrorStatus(error: any) {
+  const status = error?.status ?? error?.code ?? error?.response?.status
+  return typeof status === "number" ? status : undefined
+}
+
+function getErrorMessage(error: any) {
+  if (typeof error?.message === "string") {
+    return error.message
+  }
+  const responseMessage =
+    error?.response?.data?.error?.message ||
+    error?.response?.data?.error ||
+    error?.response?.data?.message
+  if (typeof responseMessage === "string") {
+    return responseMessage
+  }
+  return "Failed to generate image"
+}
 
 function isValidImageUrl(url: string) {
   if (typeof url !== "string" || url.length === 0) {
@@ -99,6 +121,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
     }
 
     const timeoutMs = Math.max(Number(process.env.GENERATE_TIMEOUT_MS) || 15000, 1000)
+    const maxTokens = Math.max(Number(process.env.GENERATE_MAX_TOKENS) || 2048, 256)
     const overallTimeoutMs = Math.max(
       Number(process.env.GENERATE_OVERALL_TIMEOUT_MS) || timeoutMs,
       1000
@@ -143,6 +166,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
               content,
             },
           ],
+          max_tokens: maxTokens,
           modalities: ["image", "text"],
           signal: controller.signal,
         })
@@ -178,6 +202,16 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
     )
 
     if (successful.length === 0) {
+      const rejected = completions.find(
+        (result): result is PromiseRejectedResult => !!result && result.status === "rejected"
+      )
+      const rejectedStatus = rejected ? getErrorStatus(rejected.reason) : undefined
+      if (rejectedStatus === 402) {
+        return NextResponse.json(
+          { error: "Insufficient OpenRouter credits or max_tokens too high", code: 402 },
+          { status: 402 }
+        )
+      }
       return NextResponse.json({ error: "All generation requests failed" }, { status: 502 })
     }
 
@@ -195,10 +229,15 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
       },
     })
   } catch (error: any) {
-    console.error("Generation error:", error)
+    const status = getErrorStatus(error)
+    console.error("Generation error:", {
+      status,
+      message: getErrorMessage(error),
+      response: error?.response?.data,
+    })
     return NextResponse.json(
-      { error: error.message || "Failed to generate image" },
-      { status: 500 }
+      { error: getErrorMessage(error) },
+      { status: status || 500 }
     )
   }
 }

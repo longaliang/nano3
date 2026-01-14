@@ -84,9 +84,20 @@ export function Generator() {
         }),
       })
 
+      const contentType = response.headers.get("content-type") || ""
+      const isJson = contentType.includes("application/json")
+
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.error || (language === "zh" ? "生成失败" : "Generation failed"))
+        if (isJson) {
+          const error = await response.json()
+          throw new Error(error.error || (language === "zh" ? "生成失败" : "Generation failed"))
+        }
+        const text = await response.text()
+        throw new Error(text || (language === "zh" ? "生成失败" : "Generation failed"))
+      }
+
+      if (!isJson) {
+        throw new Error(language === "zh" ? "服务器返回了非 JSON 响应" : "Server returned a non-JSON response")
       }
 
       const data = await response.json()
