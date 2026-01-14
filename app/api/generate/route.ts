@@ -3,23 +3,7 @@ import { NextRequest, NextResponse } from "next/server"
 export const runtime = "nodejs"
 export const maxDuration = 30
 
-let openaiClient: any | null = null
-
-async function getOpenAIClient() {
-  if (openaiClient) {
-    return openaiClient
-  }
-  const { default: OpenAI } = await import("openai")
-  openaiClient = new OpenAI({
-    baseURL: "https://openrouter.ai/api/v1",
-    apiKey: process.env.OPENROUTER_API_KEY || "",
-    defaultHeaders: {
-      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-      "X-Title": "Nano Banana Image Editor",
-    },
-  })
-  return openaiClient
-}
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 type ImageItem = { image_url: { url: string } }
 
@@ -184,25 +168,69 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
       ])
     }
 
+    console.log("Calling OpenRouter", {
+      requestId,
+      requestedImages,
+      maxTokens,
+      timeoutMs,
+      overallTimeoutMs,
+      maxConcurrent,
+    })
+
     const tasks = Array.from({ length: requestedImages }, () => {
       const controller = new AbortController()
       controllers.push(controller)
       return async () => {
-        const openai = await getOpenAIClient()
-        const request = openai.chat.completions.create({
-          model: "google/gemini-3-pro-image-preview",
-          messages: [
-            {
-              role: "user",
-              content,
-            },
-          ],
-          max_tokens: maxTokens,
-          modalities: ["image", "text"],
+        const request = fetch(OPENROUTER_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+            "X-Title": "Nano Banana Image Editor",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-3-pro-image-preview",
+            messages: [
+              {
+                role: "user",
+                content,
+              },
+            ],
+            max_tokens: maxTokens,
+            modalities: ["image", "text"],
+          }),
           signal: controller.signal,
         })
 
-        return withTimeout(controller, request, timeoutMs)
+        const response = await withTimeout(controller, request, timeoutMs)
+        const responseText = await response.text()
+        let responseJson: any = null
+        try {
+          responseJson = responseText ? JSON.parse(responseText) : null
+        } catch (parseError) {
+          console.error("OpenRouter response JSON parse failed", {
+            requestId,
+            parseError,
+            responseText,
+          })
+        }
+
+        if (!response.ok) {
+          const errorMessage =
+            responseJson?.error?.message ||
+            responseJson?.error ||
+            responseJson?.message ||
+            response.statusText ||
+            "OpenRouter request failed"
+          throw {
+            status: response.status,
+            message: errorMessage,
+            response: { data: responseJson || responseText },
+          }
+        }
+
+        return responseJson
       }
     })
 
