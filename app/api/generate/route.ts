@@ -26,6 +26,19 @@ function getErrorMessage(error: any) {
   return "Failed to generate image"
 }
 
+function isRetryableError(error: any) {
+  const status = getErrorStatus(error)
+  if (status && [408, 429, 500, 502, 503, 504].includes(status)) {
+    return true
+  }
+  const message = getErrorMessage(error).toLowerCase()
+  return message.includes("aborted") || message.includes("timed out")
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function isValidImageUrl(url: string) {
   if (typeof url !== "string" || url.length === 0) {
     return false
@@ -140,6 +153,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
       Number(process.env.GENERATE_OVERALL_TIMEOUT_MS) || timeoutMs,
       1000
     )
+    const effectiveMaxTokens = isImageToImage ? Math.min(maxTokens, 768) : maxTokens
     const maxConcurrent = Math.min(
       Math.max(Number(process.env.GENERATE_MAX_CONCURRENT) || requestedImages, 1),
       requestedImages
@@ -171,66 +185,86 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
     console.log("Calling OpenRouter", {
       requestId,
       requestedImages,
-      maxTokens,
+      maxTokens: effectiveMaxTokens,
       timeoutMs,
       overallTimeoutMs,
       maxConcurrent,
     })
 
     const tasks = Array.from({ length: requestedImages }, () => {
-      const controller = new AbortController()
-      controllers.push(controller)
       return async () => {
-        const request = fetch(OPENROUTER_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-            "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-            "X-Title": "Nano Banana Image Editor",
-          },
-          body: JSON.stringify({
-            model: "google/gemini-3-pro-image-preview",
-            messages: [
-              {
-                role: "user",
-                content,
+        let lastError: any
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          if (overallTimedOut) {
+            break
+          }
+          const controller = new AbortController()
+          controllers.push(controller)
+          try {
+            const request = fetch(OPENROUTER_URL, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+                "X-Title": "Nano Banana Image Editor",
               },
-            ],
-            max_tokens: maxTokens,
-            modalities: ["image", "text"],
-          }),
-          signal: controller.signal,
-        })
+              body: JSON.stringify({
+                model: "google/gemini-3-pro-image-preview",
+                messages: [
+                  {
+                    role: "user",
+                    content,
+                  },
+                ],
+                max_tokens: effectiveMaxTokens,
+                modalities: ["image", "text"],
+              }),
+              signal: controller.signal,
+            })
 
-        const response = await withTimeout(controller, request, timeoutMs)
-        const responseText = await response.text()
-        let responseJson: any = null
-        try {
-          responseJson = responseText ? JSON.parse(responseText) : null
-        } catch (parseError) {
-          console.error("OpenRouter response JSON parse failed", {
-            requestId,
-            parseError,
-            responseText,
-          })
-        }
+            const response = await withTimeout(controller, request, timeoutMs)
+            const responseText = await response.text()
+            let responseJson: any = null
+            try {
+              responseJson = responseText ? JSON.parse(responseText) : null
+            } catch (parseError) {
+              console.error("OpenRouter response JSON parse failed", {
+                requestId,
+                parseError,
+                responseText,
+              })
+            }
 
-        if (!response.ok) {
-          const errorMessage =
-            responseJson?.error?.message ||
-            responseJson?.error ||
-            responseJson?.message ||
-            response.statusText ||
-            "OpenRouter request failed"
-          throw {
-            status: response.status,
-            message: errorMessage,
-            response: { data: responseJson || responseText },
+            if (!response.ok) {
+              const errorMessage =
+                responseJson?.error?.message ||
+                responseJson?.error ||
+                responseJson?.message ||
+                response.statusText ||
+                "OpenRouter request failed"
+              throw {
+                status: response.status,
+                message: errorMessage,
+                response: { data: responseJson || responseText },
+              }
+            }
+
+            return responseJson
+          } catch (error: any) {
+            lastError = error
+            if (!isRetryableError(error) || attempt === 2) {
+              throw error
+            }
+            console.warn("OpenRouter request retrying", {
+              requestId,
+              attempt,
+              message: getErrorMessage(error),
+            })
+            await delay(300)
           }
         }
-
-        return responseJson
+        throw lastError
       }
     })
 
