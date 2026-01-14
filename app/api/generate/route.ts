@@ -265,6 +265,16 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
         (result): result is PromiseRejectedResult => !!result && result.status === "rejected"
       )
       const rejectedStatus = rejected ? getErrorStatus(rejected.reason) : undefined
+      if (rejected) {
+        console.error("All generation requests failed", {
+          requestId,
+          status: rejectedStatus,
+          message: getErrorMessage(rejected.reason),
+          response: rejected.reason?.response?.data,
+        })
+      } else {
+        console.error("All generation requests failed", { requestId })
+      }
       if (rejectedStatus === 402) {
         return NextResponse.json(
           { error: "Insufficient OpenRouter credits or max_tokens too high", code: 402 },
