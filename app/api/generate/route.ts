@@ -74,11 +74,33 @@ function extractImages(message: any): ImageItem[] {
 }
 
 export async function POST(req: NextRequest) {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   try {
-    const { prompt, imageBase64, aspectRatio, numImages, mode } = await req.json()
+    const contentType = req.headers.get("content-type") || ""
+    console.log("Generate request received", {
+      requestId,
+      contentType,
+      hasApiKey: Boolean(process.env.OPENROUTER_API_KEY),
+      siteUrl: process.env.NEXT_PUBLIC_SITE_URL,
+    })
+
+    const rawBody = await req.text()
+    let parsedBody: any
+    try {
+      parsedBody = rawBody ? JSON.parse(rawBody) : {}
+    } catch (parseError) {
+      console.error("Generate request JSON parse failed", { requestId, parseError })
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+    }
+
+    const { prompt, imageBase64, aspectRatio, numImages, mode } = parsedBody
 
     if (!prompt) {
       return NextResponse.json({ error: "Prompt is required" }, { status: 400 })
+    }
+
+    if (!process.env.OPENROUTER_API_KEY) {
+      return NextResponse.json({ error: "OPENROUTER_API_KEY is missing" }, { status: 500 })
     }
 
     const requestedImages = Math.min(Math.max(Number(numImages) || 1, 1), 4)
@@ -231,6 +253,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
   } catch (error: any) {
     const status = getErrorStatus(error)
     console.error("Generation error:", {
+      requestId,
       status,
       message: getErrorMessage(error),
       response: error?.response?.data,
