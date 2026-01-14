@@ -1,17 +1,25 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 
 export const runtime = "nodejs"
 export const maxDuration = 30
 
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY || "",
-  defaultHeaders: {
-    "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-    "X-Title": "Nano Banana Image Editor",
-  },
-})
+let openaiClient: any | null = null
+
+async function getOpenAIClient() {
+  if (openaiClient) {
+    return openaiClient
+  }
+  const { default: OpenAI } = await import("openai")
+  openaiClient = new OpenAI({
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey: process.env.OPENROUTER_API_KEY || "",
+    defaultHeaders: {
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "Nano Banana Image Editor",
+    },
+  })
+  return openaiClient
+}
 
 type ImageItem = { image_url: { url: string } }
 
@@ -180,6 +188,7 @@ Generate image in ${selectedRatio.label} aspect ratio (${selectedRatio.width}x${
       const controller = new AbortController()
       controllers.push(controller)
       return async () => {
+        const openai = await getOpenAIClient()
         const request = openai.chat.completions.create({
           model: "google/gemini-3-pro-image-preview",
           messages: [
